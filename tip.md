@@ -1,0 +1,1 @@
+az aks command invoke -g aks-rg-0719-1442 -n aks-cluster --command "kubectl get pod"
