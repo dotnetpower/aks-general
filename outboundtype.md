@@ -2,9 +2,17 @@
 
 # Egress 의 type 을 기본 Loadbalancer 에서 UserDefinedRouting 으로 변경하여 PIP 생성을 방지
 
+다음 문서 참조: https://learn.microsoft.com/ko-kr/azure/aks/limit-egress-traffic?tabs=aks-with-system-assigned-identities
+
+### 개요 
+- Hub - Spoke 구성을 위해 리소스 그룹으로 구성
+- Spoke 의 Vnet 과 Hub 의 Vnet 을 Peering 연결하고 outbound 에 대해서는 Hub 의 방화벽을 통해 나가도록 구성
+- Public IP 생성하지 않고 outboundType 을 UserDefinedRouting 을 통해 방화벽으로 트래픽 전달
+- API 서버도 Private 으로 생성하여 외부에서 API 서버 접근 통제
+- AGIC 를 사용하지 않고 AKS CNI Overlay 구성
+
 ### 예제 구성 A
 Private 망의 CNI Overlay 구성, PIP 가 생성되지 않도록 구성
-
 
 ```
 ############################################################################
@@ -144,21 +152,21 @@ echo "
 #---------------------------------------------------------------------------
 # Firewall 규칙
 #---------------------------------------------------------------------------"
-az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' --name 'apiudp' --protocols 'UDP' --source-addresses '*' --destination-addresses "AzureCloud.$LOCATION" --destination-ports 1194 --action allow --priority 100
+# az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' # --name 'apiudp' --protocols 'UDP' --source-addresses '*' --destination-addresses "AzureCloud.$LOCATION" --destination-ports 1194 --action # allow --priority 100
 
-az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' --name 'apitcp' --protocols 'TCP' --source-addresses '*' --destination-addresses "AzureCloud.$LOCATION" --destination-ports 9000
+# az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' # --name 'apitcp' --protocols 'TCP' --source-addresses '*' --destination-addresses "AzureCloud.$LOCATION" --destination-ports 9000
 
-az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' --name 'time' --protocols 'UDP' --source-addresses '*' --destination-fqdns 'ntp.ubuntu.com' --destination-ports 123
+# az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' # --name 'time' --protocols 'UDP' --source-addresses '*' --destination-fqdns 'ntp.ubuntu.com' --destination-ports 123
 
-az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' --name 'ghcr' --protocols 'TCP' --source-addresses '*' --destination-fqdns ghcr.io pkg-containers.githubusercontent.com --destination-ports '443'
+# az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' # --name 'ghcr' --protocols 'TCP' --source-addresses '*' --destination-fqdns ghcr.io pkg-containers.githubusercontent.com --destination-ports # '443'
 
-az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksmcr' --name 'mcr' --protocols 'TCP' --source-addresses '*' --destination-fqdns 'mcr.microsoft.com' --destination-ports '443'
+# az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksmcr' -# -name 'mcr' --protocols 'TCP' --source-addresses '*' --destination-fqdns 'mcr.microsoft.com' --destination-ports '443'
 
-az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' --name 'docker' --protocols 'TCP' --source-addresses '*' --destination-fqdns docker.io registry-1.docker.io production.cloudflare.docker.com --destination-ports '443'
+# az network firewall network-rule create --resource-group $RESOURCE_GROUP_HUB_NAME --firewall-name $FIREWALL_NAME --collection-name 'aksfwnr' --name 'docker' --protocols 'TCP' --source-addresses '*' --destination-fqdns docker.io registry-1.docker.io production.cloudflare.docker.com --destination-ports '443'
 
 echo "
 #---------------------------------------------------------------------------
-# Firewall 에 application-rule 규칙 생성
+# Firewall 에 application-rule 규칙 생성 AzureKubernetesService 로 일괄 적용 
 #---------------------------------------------------------------------------"
 az network firewall application-rule create \
 --resource-group $RESOURCE_GROUP_HUB_NAME \
@@ -412,4 +420,14 @@ az aks create \
 
 
 echo -e "\e[33m[완료]$(date)"
+
+
+############################################################################
+# Run command 를 통한 테스트
+############################################################################
+az aks command invoke \
+--name $CLUSTER_NAME \
+--resource-group $RESOURCE_GROUP_NAME \
+--command "kubectl get pods -A"
 ```
+![](images/2024-08-01-18-09-45.png)
