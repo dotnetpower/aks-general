@@ -133,6 +133,11 @@ spec:
     - name: app
       image: mcr.microsoft.com/azure-cli  # 또는 Azure SDK 포함된 이미지
       command: ["/bin/bash", "-c", "while true; do echo 'hello'; sleep 5; done"]
+      env:
+        - name: STORAGE_ACCOUNT
+          value: $STORAGE_ACCOUNT
+        - name: FILE_SYSTEM_NAME
+          value: $FILE_SYSTEM_NAME
       
 EOF
 
@@ -141,6 +146,31 @@ alias k=kubectl
 k exec -it adls-client -- /bin/bash
 ```
 pod 내에 접속이 되었다면 `root [ / ]# az login --identity` 명령으로 로그인 시도.
+
+pod 내에서 storage account 파일 조회
+```bash
+# 파일 조회
+az storage fs file list \
+  --account-name $STORAGE_ACCOUNT \
+  --file-system $FILE_SYSTEM_NAME \
+  --auth-mode login
+
+[
+  {
+    "contentLength": 10,
+    "creationTime": "2025-04-09T07:05:34.529594+00:00",
+    "encryptionScope": null,
+    "etag": "0x8DD7734EC9768B8",
+    "expiryTime": null,
+    "group": "9fab820a-fa51-4922-b3e4-981d696b3892",
+    "isDirectory": false,
+    "lastModified": "2025-04-09T07:05:34",
+    "name": "test.txt",
+    "owner": "9fab820a-fa51-4922-b3e4-981d696b3892",
+    "permissions": "rw-r-----"
+  }
+]
+```
 
 workload identity 의 client-id 를 조회
 
@@ -172,3 +202,4 @@ curl -H "Metadata: true" \
 
 ```
 위 명령에서 출력되는 client_id 값이 실제 workload identity 로 사용되는 managed identity 로 확인.
+
