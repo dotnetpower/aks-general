@@ -58,7 +58,7 @@ az aks create \
   --assign-identity $CONTROLPLAIN_RESOURCE_ID \
   --assign-kubelet-identity $KUBELET_RESOURCE_ID \
   --generate-ssh-keys \
-  --node-count 1 
+  --node-count 2 
 
 
 # AKS에 Managed Identity Federated Credential 추가
