@@ -69,7 +69,7 @@ Terraform 대신 Azure CLI로 동일한 리소스를 생성하려면 아래 스�
 set -euo pipefail
 
 # ===== 사용자 입력 =====
-SUBSCRIPTION_ID="<subscription-id>"   # 예: b052302c-4c8d-49a4-aa2f-9d60a7301a80
+SUBSCRIPTION_ID="<subscription-id>"   # 예: b052302c-xxxx-xxxx-xxxx-9d60a7301a80
 LOCATION="koreacentral"
 PREFIX="aks-kc"
 ENV_TAG="dev"
