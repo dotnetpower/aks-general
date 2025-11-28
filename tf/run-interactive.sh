@@ -86,10 +86,38 @@ install_helm_controller() {
     --set albController.podIdentity.clientID="$client_id"
 }
 
+ensure_k8s_extension_ready() {
+  require_command az
+
+  # k8s-extension CLI 확장이 설치되어 있는지 확인
+  if ! az extension show --name k8s-extension >/dev/null 2>&1; then
+    echo "[안내] Azure CLI k8s-extension 확장을 설치합니다."
+    az extension add --name k8s-extension --upgrade
+  fi
+
+  # 필수 리소스 공급자 등록 (없으면 등록 진행)
+  local namespaces=(
+    "Microsoft.ContainerService"
+    "Microsoft.KubernetesConfiguration"
+    "Microsoft.Kubernetes"
+  )
+
+  for ns in "${namespaces[@]}"; do
+    local state
+    state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null || echo "NotRegistered")
+    if [[ "$state" != "Registered" ]]; then
+      echo "[안내] $ns 리소스 공급자를 등록합니다."
+      az provider register --namespace "$ns" --wait
+    fi
+  done
+}
+
 install_alb_extension() {
   require_command terraform
   require_command az
   ensure_state_exists
+
+  ensure_k8s_extension_ready
 
   local client_id aks_name aks_rg
   client_id=$(terraform output -raw agc_identity_client_id)

@@ -27,6 +27,16 @@ resource "azurerm_subnet" "hub_dns_inbound" {
   resource_group_name  = azurerm_resource_group.hub.name
   virtual_network_name = azurerm_virtual_network.hub.name
   address_prefixes     = [var.subnet_prefixes.hub_dns_inbound]
+
+  delegation {
+    name = "dns-resolver-inbound"
+    service_delegation {
+      name = "Microsoft.Network/dnsResolvers"
+      actions = [
+        "Microsoft.Network/virtualNetworks/subnets/join/action"
+      ]
+    }
+  }
 }
 
 resource "azurerm_subnet" "hub_dns_outbound" {
@@ -34,6 +44,16 @@ resource "azurerm_subnet" "hub_dns_outbound" {
   resource_group_name  = azurerm_resource_group.hub.name
   virtual_network_name = azurerm_virtual_network.hub.name
   address_prefixes     = [var.subnet_prefixes.hub_dns_outbound]
+
+  delegation {
+    name = "dns-resolver-outbound"
+    service_delegation {
+      name = "Microsoft.Network/dnsResolvers"
+      actions = [
+        "Microsoft.Network/virtualNetworks/subnets/join/action"
+      ]
+    }
+  }
 }
 
 # 사설 DNS Resolver 및 Inbound/Outbound 엔드포인트

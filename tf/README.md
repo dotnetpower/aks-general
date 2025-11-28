@@ -34,7 +34,14 @@
    terraform plan -out tfplan
    terraform apply tfplan
    ```
-4. 완료 후 포털에서 리소스 그룹 상태 확인:
+4. 반복 작업을 줄이고 싶다면 `run-interactive.sh`를 실행하여 Init/Plan/Apply, Helm 설치, Portal 링크 확인 등을 메뉴 기반으로 수행할 수 있습니다.
+   ```bash
+   cd tf
+   chmod +x run-interactive.sh   # 최초 1회
+   ./run-interactive.sh
+   ```
+   스크립트 메뉴에서 원하는 번호를 선택하면 Terraform 명령 실행, AGC 컨트롤러 설치, 포털 링크 출력, Gateway 매니페스트 가이드 확인 등을 순차적으로 진행할 수 있습니다.
+5. 완료 후 포털에서 리소스 그룹 상태 확인:
    - 허브: `https://portal.azure.com/#view/HubsExtension/BrowseResourceGroups/resourceId/%2Fsubscriptions%2F<subscriptionId>%2FresourceGroups%2Frg-hub-2511`
    - 스포크: `https://portal.azure.com/#view/HubsExtension/BrowseResourceGroups/resourceId/%2Fsubscriptions%2F<subscriptionId>%2FresourceGroups%2Frg-spoke-2511`
 
@@ -60,6 +67,180 @@
    - `nat_gateway_public_ip` 출력이 AKS 아웃바운드 공용 IP 입니다.
    - CIDR, 노드 크기 등은 `variables.tf` 값을 덮어써 조정합니다. (예: `terraform apply -var "aks_node_count=5"`).
    - 실서비스에서는 원격 상태 저장소(Azure Storage 등)를 사용하고 CI/CD 파이프라인에 통합하세요.
+
+## AGC 테스트용 예제 애플리케이션
+배포가 끝났다면 아래 순서를 따라 두 개의 Nginx 앱을 배포하고 AGC(Alb Controller)를 통해 Ingress 흐름을 검증할 수 있습니다.
+
+1. **클러스터 자격 증명 다운로드**
+    ```bash
+    AKS_NAME=$(terraform output -raw aks_cluster_name)
+    SPOKE_RG=$(terraform output -raw spoke_resource_group)
+    az aks get-credentials --name "$AKS_NAME" --resource-group "$SPOKE_RG" --overwrite-existing
+    ```
+
+2. **테스트 매니페스트 작성** – 아래 내용을 `agc-nginx-demo.yaml`로 저장한 뒤 `kubectl apply -f agc-nginx-demo.yaml`를 실행합니다. `APPLICATION_LOAD_BALANCER_ID`와 `APPLICATION_LOAD_BALANCER_FRONTEND`는 Terraform 출력 값을 그대로 치환하세요.
+
+    ```yaml
+    apiVersion: networking.agc.microsoft.com/v1beta2
+    kind: ApplicationLoadBalancer
+    metadata:
+       name: internal-alb
+       namespace: default
+    spec:
+       resourceRef:
+          id: APPLICATION_LOAD_BALANCER_ID
+       frontend:
+          name: APPLICATION_LOAD_BALANCER_FRONTEND
+
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+       name: nginx-blue
+       labels:
+          app: nginx-blue
+    spec:
+       replicas: 1
+       selector:
+          matchLabels:
+             app: nginx-blue
+       template:
+          metadata:
+             labels:
+                app: nginx-blue
+          spec:
+             containers:
+                - name: nginx
+                   image: mcr.microsoft.com/oss/nginx/nginx:1.23.3
+                   ports:
+                      - containerPort: 80
+                   env:
+                      - name: SITE_COLOR
+                         value: "blue"
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+       name: nginx-blue
+    spec:
+       selector:
+          app: nginx-blue
+       ports:
+          - port: 80
+             targetPort: 80
+
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+       name: nginx-green
+       labels:
+          app: nginx-green
+    spec:
+       replicas: 1
+       selector:
+          matchLabels:
+             app: nginx-green
+       template:
+          metadata:
+             labels:
+                app: nginx-green
+          spec:
+             containers:
+                - name: nginx
+                   image: mcr.microsoft.com/oss/nginx/nginx:1.23.3
+                   ports:
+                      - containerPort: 80
+                   env:
+                      - name: SITE_COLOR
+                         value: "green"
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+       name: nginx-green
+    spec:
+       selector:
+          app: nginx-green
+       ports:
+          - port: 80
+             targetPort: 80
+
+    ---
+    apiVersion: gateway.networking.k8s.io/v1beta1
+    kind: Gateway
+    metadata:
+       name: agc-gateway
+    spec:
+       gatewayClassName: alb.gateway.azure.com
+       listeners:
+          - name: http
+             protocol: HTTP
+             port: 80
+             hostname: demo.internal
+             allowedRoutes:
+                namespaces:
+                   from: Same
+
+    ---
+    apiVersion: gateway.networking.k8s.io/v1beta1
+    kind: HTTPRoute
+    metadata:
+       name: blue-green-route
+    spec:
+       parentRefs:
+          - name: agc-gateway
+             sectionName: http
+       hostnames:
+          - demo.internal
+       rules:
+          - matches:
+                - path:
+                      type: PathPrefix
+                      value: /blue
+             backendRefs:
+                - name: nginx-blue
+                   port: 80
+          - matches:
+                - path:
+                      type: PathPrefix
+                      value: /green
+             backendRefs:
+                - name: nginx-green
+                   port: 80
+    ```
+
+3. **동작 확인** – 게이트웨이와 라우트가 `Accepted=True` 상태인지 확인합니다.
+    ```bash
+    kubectl get gateway,httproute
+    ```
+    `demo.internal` 호스트에 대한 DNS 레코드를 사설 DNS에 추가한 뒤(혹은 Pod 내에서 `/etc/hosts`로 매핑) `curl http://demo.internal/blue` / `curl http://demo.internal/green` 요청이 각기 다른 Nginx 응답을 반환하면 AGC Ingress 구성이 정상 동작하는 것입니다.
+
+`curl` 결과에 색상이 보이도록 하고 싶다면 Nginx 컨테이너 이미지 대신 커스텀 HTML을 포함한 간단한 이미지를 사용할 수도 있습니다. 필요 시 복제 수를 늘려 부하 분산 동작도 함께 검증해 보세요.
+
+## 로컬 테스트용 API 서버 임시 개방
+프라이빗 AKS는 기본적으로 퍼블릭 API 엔드포인트가 비활성화되어 있습니다. 로컬 PC에서 잠시 접근해야 한다면 다음 순서로 공용 FQDN을 켜고 내 IP만 허용 목록에 추가한 뒤, 테스트가 끝나면 반드시 원래 상태로 되돌리세요.
+
+1. **변수 준비 및 현재 공용 IP 확인**
+   ```bash
+   AKS_NAME=$(terraform output -raw aks_cluster_name)
+   SPOKE_RG=$(terraform output -raw spoke_resource_group)
+   MY_IP=$(curl -s https://ifconfig.me)
+   ```
+
+2. **공용 FQDN 활성화 + IP 허용 목록 등록**
+   ```bash
+   az aks update --resource-group "$SPOKE_RG" --name "$AKS_NAME" --enable-public-fqdn
+   az aks update --resource-group "$SPOKE_RG" --name "$AKS_NAME" --api-server-authorized-ip-ranges "${MY_IP}/32"
+   ```
+   이제 `az aks get-credentials` 또는 `kubectl` 접근 시 공용 FQDN을 사용할 수 있습니다. VPN/전용 회선 없이도 로컬에서 관리 작업을 진행할 수 있지만, 허용된 IP 대역만 접근 가능하므로 다른 위치에서 테스트하려면 위 절차를 다시 실행해 주세요.
+
+3. **테스트 종료 후 원복(중요)**
+   ```bash
+   az aks update --resource-group "$SPOKE_RG" --name "$AKS_NAME" --api-server-authorized-ip-ranges ""
+   az aks update --resource-group "$SPOKE_RG" --name "$AKS_NAME" --disable-public-fqdn
+   ```
+   허용 목록을 비우고 공용 FQDN을 끄면 다시 완전한 프라이빗 상태로 되돌아갑니다. 기업 정책상 공용 FQDN 허용이 제한되는 경우, Bastion/Jumpbox 또는 VPN을 통해 사설 VNet에 접속하는 방안을 권장합니다.
 
 ## Azure CLI 스크립트 예제
 Terraform 대신 Azure CLI로 동일한 리소스를 생성하려면 아래 스크립트를 복사해 실행하세요. 미리 `SUBSCRIPTION_ID`를 실제 구독 ID로 바꾸고, 필요 시 CIDR/노드 수 등의 기본값을 수정하면 됩니다. Application Load Balancer(AGC) CLI는 `alb` 확장이 필요하므로 스크립트 초반에 자동으로 설치합니다.
