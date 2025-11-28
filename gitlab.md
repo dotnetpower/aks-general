@@ -144,6 +144,14 @@ EXTERNAL_URL="http://<public-ip>" sudo apt-get install -y gitlab-ee
 # 초기 root 패스워드 확인
 sudo cat /etc/gitlab/initial_root_password
 
+# Prometheus health check
+curl http://localhost:9090/-/healthy
+curl http://localhost:8080/-/health
+
+# 서비스 전체 상태 확인
+sudo gitlab-ctl status
+
+
 EOF
 
 echo ""
