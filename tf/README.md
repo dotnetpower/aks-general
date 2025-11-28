@@ -88,9 +88,9 @@
        namespace: default
     spec:
        resourceRef:
-          id: APPLICATION_LOAD_BALANCER_ID
+          id: /subscriptions/b052302c-4c8d-49a4-aa2f-9d60a7301a80/resourceGroups/rg-spoke-251128/providers/Microsoft.ServiceNetworking/trafficControllers/aks-kc-agc
        frontend:
-          name: APPLICATION_LOAD_BALANCER_FRONTEND
+          name: private-frontend
 
     ---
     apiVersion: apps/v1
@@ -218,192 +218,24 @@
 
 `curl` 결과에 색상이 보이도록 하고 싶다면 Nginx 컨테이너 이미지 대신 커스텀 HTML을 포함한 간단한 이미지를 사용할 수도 있습니다. 필요 시 복제 수를 늘려 부하 분산 동작도 함께 검증해 보세요.
 
-## 로컬 테스트용 API 서버 임시 개방
-프라이빗 AKS는 기본적으로 퍼블릭 API 엔드포인트가 비활성화되어 있습니다. 로컬 PC에서 잠시 접근해야 한다면 다음 순서로 공용 FQDN을 켜고 내 IP만 허용 목록에 추가한 뒤, 테스트가 끝나면 반드시 원래 상태로 되돌리세요.
+## 로컬 테스트용 API 서버 접근 전략
+프라이빗 AKS는 설계상 퍼블릭 API 엔드포인트가 비활성화되어 있으며, `--api-server-authorized-ip-ranges` 옵션은 지원되지 않습니다(명령 실행 시 *"is not supported for private cluster"* 오류 발생). 따라서 외부에서 임시로 허용 IP를 추가하는 방식 대신 아래와 같은 경로로 테스트를 진행해야 합니다.
 
-1. **변수 준비 및 현재 공용 IP 확인**
+1. **`az aks command invoke` 사용**: Azure CLI가 백엔드에서 프라이빗 네트워크에 접속하므로 로컬 PC가 인터넷에만 연결되어 있어도 `kubectl` 명령을 실행할 수 있습니다.
    ```bash
    AKS_NAME=$(terraform output -raw aks_cluster_name)
    SPOKE_RG=$(terraform output -raw spoke_resource_group)
-   MY_IP=$(curl -s https://ifconfig.me)
+
+   az aks command invoke \
+     --name "$AKS_NAME" \
+     --resource-group "$SPOKE_RG" \
+     --command "kubectl get nodes"
    ```
+   반복 실행 시에도 API 서버는 외부에 개방되지 않습니다.
 
-2. **공용 FQDN 활성화 + IP 허용 목록 등록**
-   ```bash
-   az aks update --resource-group "$SPOKE_RG" --name "$AKS_NAME" --enable-public-fqdn
-   az aks update --resource-group "$SPOKE_RG" --name "$AKS_NAME" --api-server-authorized-ip-ranges "${MY_IP}/32"
-   ```
-   이제 `az aks get-credentials` 또는 `kubectl` 접근 시 공용 FQDN을 사용할 수 있습니다. VPN/전용 회선 없이도 로컬에서 관리 작업을 진행할 수 있지만, 허용된 IP 대역만 접근 가능하므로 다른 위치에서 테스트하려면 위 절차를 다시 실행해 주세요.
+2. **사설 네트워크 경로 구성**: VPN/ExpressRoute/고정 회선, Azure Bastion, Jumpbox VM 등을 통해 허브·스포크 VNet 내부로 진입한 뒤 `kubectl`을 실행합니다. 이 경우 로컬 PC는 사설 VNet과 동일한 네트워크(또는 피어링된 네트워크)에 있어야 하므로 보안 정책을 만족시키기 쉽습니다.
 
-3. **테스트 종료 후 원복(중요)**
-   ```bash
-   az aks update --resource-group "$SPOKE_RG" --name "$AKS_NAME" --api-server-authorized-ip-ranges ""
-   az aks update --resource-group "$SPOKE_RG" --name "$AKS_NAME" --disable-public-fqdn
-   ```
-   허용 목록을 비우고 공용 FQDN을 끄면 다시 완전한 프라이빗 상태로 되돌아갑니다. 기업 정책상 공용 FQDN 허용이 제한되는 경우, Bastion/Jumpbox 또는 VPN을 통해 사설 VNet에 접속하는 방안을 권장합니다.
+3. **Dev Box or Azure Container Apps(Az CLI Tunnel)**: 개발자용 환경을 Azure 상에 두고, 해당 환경에서 프라이빗 클러스터에 직접 접근하도록 구성할 수도 있습니다. 이 역시 API 서버를 퍼블릭으로 만들지 않으면서도 조작이 가능합니다.
 
-## Azure CLI 스크립트 예제
-Terraform 대신 Azure CLI로 동일한 리소스를 생성하려면 아래 스크립트를 복사해 실행하세요. 미리 `SUBSCRIPTION_ID`를 실제 구독 ID로 바꾸고, 필요 시 CIDR/노드 수 등의 기본값을 수정하면 됩니다. Application Load Balancer(AGC) CLI는 `alb` 확장이 필요하므로 스크립트 초반에 자동으로 설치합니다.
+테스트 후에는 프라이빗 DNS/라우팅 구성만 원상태로 두면 되며, 추가적인 `az aks update --enable-public-fqdn`/`--disable-public-fqdn` 작업이 필요하지 않습니다. 만약 조직 정책상 공용 경로가 꼭 필요한 경우, 아키텍처 자체를 Public AKS + 허용 IP 방식으로 다시 설계해야 합니다.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-# ===== 사용자 입력 =====
-SUBSCRIPTION_ID="<subscription-id>"   # 예: b052302c-xxxx-xxxx-xxxx-9d60a7301a80
-LOCATION="koreacentral"
-PREFIX="aks-kc"
-ENV_TAG="dev"
-
-HUB_RG="rg-hub-2511"
-SPOKE_RG="rg-spoke-2511"
-PRIVATE_DNS_ZONE="privatelink.koreacentral.azmk8s.io"
-
-HUB_VNET_CIDR="10.10.0.0/16"
-SPOKE_VNET_CIDR="10.20.0.0/16"
-SUBNET_DNS_IN="10.10.2.0/26"
-SUBNET_DNS_OUT="10.10.2.64/26"
-SUBNET_AKS="10.20.1.0/24"
-SUBNET_AGC="10.20.2.0/24"
-POD_CIDR="10.244.0.0/16"
-SERVICE_CIDR="10.100.0.0/16"
-DNS_SERVICE_IP="10.100.0.10"
-NODE_COUNT=3
-NODE_SIZE="Standard_D4s_v3"
-K8S_VERSION="1.32.9"
-
-[[ "$SUBSCRIPTION_ID" == "<subscription-id>" ]] && {
-   echo "[오류] SUBSCRIPTION_ID 값을 실제 구독 ID로 변경하세요." >&2
-   exit 1
-}
-
-# ===== 파생 변수 =====
-TAGS="Environment=$ENV_TAG ManagedBy=azure-cli Project=aks-private-agc Location=$LOCATION"
-HUB_VNET="${PREFIX}-hub-vnet"
-SPOKE_VNET="${PREFIX}-spoke-vnet"
-LOG_ANALYTICS="${PREFIX}-law-${LOCATION}"
-NAT_NAME="${PREFIX}-nat"
-NAT_PIP="${NAT_NAME}-pip"
-AKS_NAME="${PREFIX}-aks"
-AKS_ID_NAME="${PREFIX}-aks-identity"
-AGC_NAME="${PREFIX}-agc"
-AGC_ID_NAME="${PREFIX}-agc-identity"
-AGC_FRONTEND="private-frontend"
-PRIVATE_DNS_LINK_HUB="${PREFIX}-hub-dns-link"
-PRIVATE_DNS_LINK_SPOKE="${PREFIX}-spoke-dns-link"
-SPOKE_RG_ID="/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$SPOKE_RG"
-
-az account set --subscription "$SUBSCRIPTION_ID"
-az extension add --name aks-preview --upgrade
-az extension add --name alb --upgrade
-
-for ns in Microsoft.ContainerService Microsoft.Network Microsoft.ServiceNetworking Microsoft.ServiceLinker; do
-   state=$(az provider show --namespace "$ns" --query registrationState -o tsv 2>/dev/null || echo "NotRegistered")
-   [[ "$state" != "Registered" ]] && az provider register --namespace "$ns" --wait
-done
-
-az group create --name "$HUB_RG" --location "$LOCATION" --tags $TAGS >/dev/null
-az group create --name "$SPOKE_RG" --location "$LOCATION" --tags $TAGS >/dev/null
-
-az monitor log-analytics workspace create \
-   --resource-group "$HUB_RG" \
-   --workspace-name "$LOG_ANALYTICS" \
-   --location "$LOCATION" \
-   --retention-time 60 \
-   --tags $TAGS >/dev/null
-LOG_ANALYTICS_ID=$(az monitor log-analytics workspace show -g "$HUB_RG" -n "$LOG_ANALYTICS" --query id -o tsv)
-
-az network vnet create -g "$HUB_RG" -n "$HUB_VNET" --location "$LOCATION" --address-prefixes "$HUB_VNET_CIDR" --tags $TAGS >/dev/null
-az network vnet subnet create -g "$HUB_RG" --vnet-name "$HUB_VNET" --name DnsInboundSubnet --address-prefixes "$SUBNET_DNS_IN"
-az network vnet subnet create -g "$HUB_RG" --vnet-name "$HUB_VNET" --name DnsOutboundSubnet --address-prefixes "$SUBNET_DNS_OUT"
-
-az network vnet create -g "$SPOKE_RG" -n "$SPOKE_VNET" --location "$LOCATION" --address-prefixes "$SPOKE_VNET_CIDR" --tags $TAGS >/dev/null
-az network vnet subnet create -g "$SPOKE_RG" --vnet-name "$SPOKE_VNET" --name AksNodeSubnet --address-prefixes "$SUBNET_AKS"
-az network vnet subnet create -g "$SPOKE_RG" --vnet-name "$SPOKE_VNET" --name AgcSubnet --address-prefixes "$SUBNET_AGC" --delegations "Microsoft.ServiceNetworking/trafficControllers"
-
-HUB_VNET_ID=$(az network vnet show -g "$HUB_RG" -n "$HUB_VNET" --query id -o tsv)
-SPOKE_VNET_ID=$(az network vnet show -g "$SPOKE_RG" -n "$SPOKE_VNET" --query id -o tsv)
-AKS_SUBNET_ID=$(az network vnet subnet show -g "$SPOKE_RG" --vnet-name "$SPOKE_VNET" -n AksNodeSubnet --query id -o tsv)
-AGC_SUBNET_ID=$(az network vnet subnet show -g "$SPOKE_RG" --vnet-name "$SPOKE_VNET" -n AgcSubnet --query id -o tsv)
-DNS_INBOUND_SUBNET_ID=$(az network vnet subnet show -g "$HUB_RG" --vnet-name "$HUB_VNET" -n DnsInboundSubnet --query id -o tsv)
-DNS_OUTBOUND_SUBNET_ID=$(az network vnet subnet show -g "$HUB_RG" --vnet-name "$HUB_VNET" -n DnsOutboundSubnet --query id -o tsv)
-
-az network public-ip create -g "$SPOKE_RG" -n "$NAT_PIP" --sku Standard --allocation-method Static --location "$LOCATION" --tags $TAGS >/dev/null
-az network nat gateway create -g "$SPOKE_RG" -n "$NAT_NAME" --location "$LOCATION" --public-ip-addresses "$NAT_PIP" --tags $TAGS >/dev/null
-az network vnet subnet update -g "$SPOKE_RG" --vnet-name "$SPOKE_VNET" --name AksNodeSubnet --nat-gateway "$NAT_NAME" >/dev/null
-
-az network private-dns zone create -g "$HUB_RG" -n "$PRIVATE_DNS_ZONE" >/dev/null
-PRIVATE_DNS_ZONE_ID=$(az network private-dns zone show -g "$HUB_RG" -n "$PRIVATE_DNS_ZONE" --query id -o tsv)
-az network private-dns link vnet create -g "$HUB_RG" -n "$PRIVATE_DNS_LINK_HUB" --zone-name "$PRIVATE_DNS_ZONE" --virtual-network "$HUB_VNET_ID" --registration-enabled false >/dev/null
-az network private-dns link vnet create -g "$HUB_RG" -n "$PRIVATE_DNS_LINK_SPOKE" --zone-name "$PRIVATE_DNS_ZONE" --virtual-network "$SPOKE_VNET_ID" --registration-enabled false >/dev/null
-
-DNS_RESOLVER_NAME="${PREFIX}-dns-resolver"
-az network private-dns-resolver create -g "$HUB_RG" -n "$DNS_RESOLVER_NAME" --location "$LOCATION" --virtual-network "$HUB_VNET_ID" --tags $TAGS >/dev/null
-az network private-dns-resolver inbound-endpoint create -g "$HUB_RG" --resolver-name "$DNS_RESOLVER_NAME" --name "${PREFIX}-dns-inbound" --location "$LOCATION" --ip-configurations subnet=$DNS_INBOUND_SUBNET_ID >/dev/null
-az network private-dns-resolver outbound-endpoint create -g "$HUB_RG" --resolver-name "$DNS_RESOLVER_NAME" --name "${PREFIX}-dns-outbound" --location "$LOCATION" --subnet $DNS_OUTBOUND_SUBNET_ID >/dev/null
-
-az network vnet peering create -g "$HUB_RG" --name hub-to-spoke --vnet-name "$HUB_VNET" --remote-vnet "$SPOKE_VNET_ID" --allow-vnet-access --allow-forwarded-traffic >/dev/null
-az network vnet peering create -g "$SPOKE_RG" --name spoke-to-hub --vnet-name "$SPOKE_VNET" --remote-vnet "$HUB_VNET_ID" --allow-vnet-access --allow-forwarded-traffic >/dev/null
-
-az identity create -g "$SPOKE_RG" -n "$AKS_ID_NAME" --location "$LOCATION" --tags $TAGS >/dev/null
-az identity create -g "$SPOKE_RG" -n "$AGC_ID_NAME" --location "$LOCATION" --tags $TAGS >/dev/null
-AKS_ID=$(az identity show -g "$SPOKE_RG" -n "$AKS_ID_NAME" --query id -o tsv)
-AKS_PRINCIPAL_ID=$(az identity show -g "$SPOKE_RG" -n "$AKS_ID_NAME" --query principalId -o tsv)
-AGC_ID=$(az identity show -g "$SPOKE_RG" -n "$AGC_ID_NAME" --query id -o tsv)
-AGC_PRINCIPAL_ID=$(az identity show -g "$SPOKE_RG" -n "$AGC_ID_NAME" --query principalId -o tsv)
-AGC_CLIENT_ID=$(az identity show -g "$SPOKE_RG" -n "$AGC_ID_NAME" --query clientId -o tsv)
-
-az role assignment create --assignee-object-id "$AKS_PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role "Network Contributor" --scope "$SPOKE_VNET_ID" >/dev/null
-az role assignment create --assignee-object-id "$AKS_PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role "Private DNS Zone Contributor" --scope "$PRIVATE_DNS_ZONE_ID" >/dev/null
-az role assignment create --assignee-object-id "$AGC_PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role "Network Contributor" --scope "$SPOKE_VNET_ID" >/dev/null
-az role assignment create --assignee-object-id "$AGC_PRINCIPAL_ID" --assignee-principal-type ServicePrincipal --role "Contributor" --scope "$SPOKE_RG_ID" >/dev/null
-
-az network alb create --resource-group "$SPOKE_RG" --name "$AGC_NAME" --location "$LOCATION" --tags $TAGS >/dev/null
-az network alb frontend create --resource-group "$SPOKE_RG" --alb-name "$AGC_NAME" --name "$AGC_FRONTEND" --subnet "$AGC_SUBNET_ID" >/dev/null
-
-az aks create \
-   --resource-group "$SPOKE_RG" \
-   --name "$AKS_NAME" \
-   --location "$LOCATION" \
-   --kubernetes-version "$K8S_VERSION" \
-   --tier Standard \
-   --nodepool-name system \
-   --node-count "$NODE_COUNT" \
-   --node-vm-size "$NODE_SIZE" \
-   --node-osdisk-size 128 \
-   --network-plugin azure \
-   --network-plugin-mode overlay \
-   --pod-cidr "$POD_CIDR" \
-   --service-cidr "$SERVICE_CIDR" \
-   --dns-service-ip "$DNS_SERVICE_IP" \
-   --vnet-subnet-id "$AKS_SUBNET_ID" \
-   --outbound-type loadBalancer \
-   --enable-private-cluster \
-   --private-dns-zone "$PRIVATE_DNS_ZONE_ID" \
-   --enable-managed-identity \
-   --assign-identity "$AKS_ID" \
-   --enable-oidc-issuer \
-   --enable-workload-identity \
-   --enable-azure-policy \
-   --enable-addons monitoring \
-   --workspace-resource-id "$LOG_ANALYTICS_ID" \
-   --tags $TAGS
-
-cat <<INFO
-========================================
-생성 완료
-----------------------------------------
-AKS 리소스 그룹 : $SPOKE_RG
-AKS 클러스터   : $AKS_NAME
-AGC 리소스 ID  : $(az network alb show -g "$SPOKE_RG" -n "$AGC_NAME" --query id -o tsv)
-AGC 프런트엔드 : $AGC_FRONTEND
-AGC UAMI ID    : $AGC_ID
-AGC Client ID  : $AGC_CLIENT_ID
-========================================
-INFO
-```
-
-> ⚠️ **주의**
-> - `az network alb` 명령은 Alb 확장(미리보기) 기능을 사용하므로 최신 CLI(또는 `az upgrade`)가 필요합니다.
-> - Azure CLI가 미리보기 기능을 호출할 때 종종 시간이 오래 걸립니다. 명령 실패 시 같은 단계를 다시 실행하거나 `--debug` 옵션으로 상세 로그를 확인하세요.
-> - Terraform과 동일하게 AKS는 Managed NAT Gateway 아웃바운드를 사용하므로, 별도 egress 경로가 필요하면 `--outbound-type`과 NAT 설정을 환경에 맞게 조정하세요.
