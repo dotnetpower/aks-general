@@ -5,7 +5,48 @@
 - **허브(`rg-hub-2511`)**: Private DNS Resolver, Private DNS Zone, Log Analytics Workspace.
 - **스포크(`rg-spoke-2511`)**: Azure CNI Overlay 를 사용하는 프라이빗 AKS 클러스터, AGC(Application Load Balancer), NAT Gateway. 허브와의 VNet 피어링으로 Pod 가 사설 통신을 유지합니다.
 - **아웃바운드 경로**: AKS 노드는 스포크 서브넷에 연결된 NAT Gateway 를 통해 인터넷으로 나가며, 고정 공용 IP는 `nat_gateway_public_ip` 출력으로 확인합니다.
-- **AGC**: 퍼블릭 IP 없이 전용 서브넷에만 연결되며, Terraform 출력 값을 이용해 Helm 혹은 `az k8s-extension` 으로 컨트롤러를 배포합니다.
+- **AGC**: 스포크 VNet의 전용 서브넷에 연결되며, Terraform 출력 값을 이용해 Helm 혹은 `az k8s-extension` 으로 컨트롤러를 배포합니다.
+
+## ⚠️ AGC 프론트엔드 공용 IP 주소에 대한 중요 참고사항
+
+**Application Gateway for Containers (AGC)는 현재 Private IP 주소 프론트엔드를 지원하지 않습니다.**
+
+Microsoft 공식 문서 ["Application Gateway for Containers components"](https://learn.microsoft.com/azure/application-gateway/for-containers/application-gateway-for-containers-components)에 따르면:
+
+> **Application Gateway for Containers frontends**
+> - 2.3. **Private IP addresses are currently unsupported.**
+
+이는 AGC 프론트엔드가 항상 공용 DNS 이름(예: `hvg4b0afg0d3bybt.fz39.alb.azure.com`)과 공용 IP 주소를 할당받음을 의미합니다.
+
+### AGC vs 기존 Application Gateway 비교
+
+| 기능 | Application Gateway (v1/v2) | Application Gateway for Containers (AGC) |
+|------|----------------------------|-------------------------------------------|
+| Private IP 전용 프론트엔드 | ✅ 지원 (미리보기) | ❌ 미지원 (2025년 기준) |
+| 리소스 타입 | `Microsoft.Network/applicationGateways` | `Microsoft.ServiceNetworking/trafficControllers` |
+| 서브넷 델리게이션 | `Microsoft.Network/applicationGateways` | `Microsoft.ServiceNetworking/trafficControllers` |
+| 아키텍처 | 기존 L7 로드 밸런서 | Gateway API 기반 최신 아키텍처 |
+
+### 네트워크 보안 고려사항
+
+AGC 프론트엔드가 공용 IP를 가지더라도, 다음 방법으로 네트워크 접근을 제어할 수 있습니다:
+
+1. **NSG(Network Security Group)**: AGC 서브넷에 연결하여 특정 소스 IP/포트만 허용
+2. **Azure Firewall/NVA**: 허브-스포크 아키텍처에서 중앙 방화벽으로 트래픽 제어
+3. **Private Link Service**: 백엔드를 완전히 사설로 유지하면서 프론트엔드만 공용 노출
+
+### Private-only 로드 밸런서가 필요한 경우 대안
+
+완전히 사설 IP만 사용하는 로드 밸런서가 필요하다면:
+
+1. **Azure Internal Load Balancer** - Kubernetes Service `type: LoadBalancer` + `service.beta.kubernetes.io/azure-load-balancer-internal: "true"`
+2. **NGINX Ingress Controller** - Internal Load Balancer 사용
+3. **Application Gateway v2** - Private IP 전용 모드 (미리보기)
+4. **Istio/Envoy Gateway** - 사설 네트워크 내부 배포
+
+### 결론
+
+현재 이 Terraform 예제는 AGC의 최신 기능(Gateway API, 자동 스케일링, 컨테이너 최적화)을 활용하는 대신, 프론트엔드 공용 IP를 수용해야 합니다. Microsoft가 향후 AGC에 Private IP 프론트엔드 지원을 추가할 가능성이 있으니, 최신 [공식 문서](https://learn.microsoft.com/azure/application-gateway/for-containers/)를 확인하시기 바랍니다.
 
 ## 폴더 구성
 
